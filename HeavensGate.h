@@ -23,7 +23,7 @@ db( 83 ) db( 04 ) db( 24 ) db( 05 )					\
 db( CB )											
 
 //
-// Switch the CPU to x86-32( WOW64 ) mode
+// Switch the CPU to x86-32 mode
 //
 #define EXIT_X64_MODE( )												\
 db( E8 ) db( 00 ) db( 00 ) db( 00 ) db( 00 )							\
@@ -42,6 +42,9 @@ db( CB )
 */
 #define HgCopyMemory( _DEST_, _SRC_, _LEN_ ) \
 X64_MEMCPY( ( DWORD64 )( _DEST_ ), ( DWORD64 )( _SRC_ ), ( DWORD64 )( _LEN_ ) )
+
+#define HgZeroMemory( _DEST_, _LEN_ ) \
+X64_MEMSET( ( DWORD64 )( _DEST_ ), NULL, ( DWORD64 )( _LEN_ ) )
 
 /**
  * @brief Get the address to a function in a 64-bit loaded module
@@ -89,12 +92,46 @@ X64_GETTEB( )
 X64_SIG_SCAN( ( DWORD64 )( _BASE_ ), ( DWORD64 )( _RANGE_ ), ( PBYTE )( _SIG_ ), ( LPCSTR )( _MASK_ ), ( SIZE_T )( _MAXSUB_ ) )
 
 /**
+ * @brief Scan for a IDA-Style byte pattern in a 64-bit region
+ * @param [in] SearchBase: The address to start searching
+ * @param [in] SearchRange: The amount in bytes to search
+ * @param [in] Signature: The byte pattern (Example: "48 8B ? ? ? ? ? FF * 90")
+ * @param [in] MaxSubSearch: The maximum range in bytes to search when the ambiguous operator('*') is hit
+ * @return The address where the byte pattern was found
+*/
+#define HgFindPatternA( _BASE_, _RANGE_, _SIG_, _MAXSUB_ ) \
+X64_SIG_SCAN_A( ( DWORD64 )( _BASE_ ), ( DWORD64 )( _RANGE_ ), ( LPCSTR )( _SIG_ ), ( SIZE_T )( _MAXSUB_ ) )
+
+/**
+ * @brief Call VirtualProtect on a 64-bit memory address
+ * @param [in] BaseAddress: The start address of the protection
+ * @param [in] NumBytesToProtect: The amount in bytes to protect
+ * @param [in] NewProtection: The new protection status
+ * @param [out] OldProtection: The value to store the old protection status in
+ * @return NTSTATUS
+*/
+#define HgProtectVirtualMemory( _BASE_, _RANGE_, _NEWPROT_, _OLDPROT_ ) \
+X64_PROTECTVIRTUALMEMORY( ( DWORD64 )( _BASE_ ), ( DWORD64 )( _RANGE_ ), ( ULONG )( _NEWPROT_ ), ( PULONG )( _OLDPROT_ ) );
+
+/**
  * @brief Obtain the 64-bit PEB structure
  * @param NONE
  * @return The address to the PEB structure
 */
 #define HgGetPEB( ) \
 X64_GETPEB( )
+
+//
+// For the 32-bit Instrumentation callback; the original EIP gets stored in ECX. Make sure this register is preserved in the handler
+// and jump to it at the end of the handler, preferrably with all the other registers saved as well
+//
+/**
+ * @brief Sets the instrumentation callback value in Wow64InformationPointers to the specified 32-bit function
+ * @param [in] FunctionPointer: The pointer to the handler function
+ * @return TRUE if the function succeeds
+*/
+#define HgSet32BitInstrumentationCallback( _FUNCTION_ ) \
+WOW64_SETINSTRUMENTATIONCALLBACK( ( PVOID )( _FUNCTION_ ) )
 
 #define GetNameFromPath( _STR_ ) \
 strrchr( _STR_, '\\' ) ? ( CONST CHAR* )( strrchr( _STR_, '\\' ) + 1 ) : ( _STR_ )
@@ -236,6 +273,40 @@ X64_GETTEB(
 		pop RetValue
 
 		EXIT_X64_MODE( );
+	}
+}
+
+HEAVENSGATE_NOINLINE
+VOID
+WINAPI
+X64_MEMSET( 
+	IN DWORD64 Destination, 
+	IN DWORD64 Value, 
+	IN DWORD64 Len 
+	)
+{
+	__asm
+	{
+		push edi
+		push esi
+
+		ENTER_X64_MODE( );
+
+		push Destination
+		pop edi
+
+		push Value
+		pop eax
+
+		push Len
+		pop ecx
+
+		rep stosb
+
+		EXIT_X64_MODE( );
+
+		pop edi
+		pop esi
 	}
 }
 
@@ -465,7 +536,7 @@ X64_SIG_SCAN(
 
 	HgCopyMemory( SearchRegion, SearchBase, SearchRange );
 
-	while ( SearchIterator[ 0 ]++ < SearchRegion + SearchRange )
+	while ( SearchIterator[ 0 ] < ( SearchRegion + SearchRange ) )
 	{
 		BOOLEAN FullMatch = TRUE;
 
@@ -495,6 +566,7 @@ X64_SIG_SCAN(
 			return SearchBase + ( DWORD64 )( SearchIterator[ 0 ] - SearchRegion );
 		}
 
+		SearchIterator[ 0 ]++;
 		SearchIterator[ 1 ] = SearchIterator[ 0 ];
 	}
 
@@ -524,11 +596,11 @@ X64_SIG_SCAN_A(
 
 	for ( SIZE_T i = NULL; i < SigStringLength; i++ )
 	{
-		if ( Signature[ i ] != '\x20' ) 
+		if ( Signature[ i ] != '\x20' && Signature[ i ] != NULL )
 		{
 			BYTE Value = __HRATOB( &Signature[ i ] );
 
-			if ( Value > 0xF ) {
+			if ( Value > 0xF || ( i + 1 < SigStringLength && Signature[ i + 1 ] != '\x20' ) ) {
 				i++;
 			}
 
@@ -540,14 +612,46 @@ X64_SIG_SCAN_A(
 				RawSignature[ RawSigLength ] = Value;
 				Mask		[ RawSigLength ] = 'x';
 			}
-			
+
 			RawSigLength++;
 		}
 	}
 
 
-		printf( "%s", Mask );
 
+	return X64_SIG_SCAN( SearchBase, SearchRange, RawSignature, Mask, MaxSubSearch );
+}
+
+HEAVENSGATE_NOINLINE
+BOOLEAN
+WINAPI
+WOW64_SETINSTRUMENTATIONCALLBACK(
+	IN PVOID FunctionPointer
+)
+{
+	CONST DWORD64 Wow64Handle = HgGetModuleHandleA( "wow64.dll" );
+	CONST SIZE_T  Wow64Size   = HgGetModuleSize( Wow64Handle );
+
+	if ( Wow64Handle == NULL )
+		return FALSE;
+
+	DWORD64 pWow64InformationPointers = HgFindPatternA(
+		Wow64Handle, Wow64Size, "48 8B 05 ? ? ? ? C7 00 00 10 00 00", NULL );
+
+	if ( pWow64InformationPointers == NULL )
+		return FALSE;
+
+	DWORD64 Wow64InformationPointers = NULL;
+
+	INT32 RelativeVirtual = NULL;
+	HgCopyMemory( &RelativeVirtual, pWow64InformationPointers + 3, sizeof( INT32 ) );
+
+	pWow64InformationPointers += ( RelativeVirtual + 7 );
+
+	HgCopyMemory( &Wow64InformationPointers, pWow64InformationPointers, sizeof( DWORD64 ) );
+	HgCopyMemory( Wow64InformationPointers + 8, &FunctionPointer, sizeof( PVOID ) );
+
+	return TRUE;
 }
 
 /**
@@ -702,9 +806,8 @@ X64_SYSCALL(
  * @param [in] NumArgs: The amount of arguments in the array
  * @return The return value of the function called
 */
-template< typename _RET_TYPE_ >
 HEAVENSGATE_NOINLINE
-_RET_TYPE_
+DWORD
 WINAPI
 X64_CALL( 
 	IN DWORD64	FunctionAddress, 
@@ -712,12 +815,8 @@ X64_CALL(
 	IN SIZE_T	NumArgs 
 	)
 {
-	DWORD64		ReturnValue = NULL;
+	DWORD		ReturnValue = NULL;
 	SIZE_T		ArgCounter	= NULL;
-
-	if ( sizeof( _RET_TYPE_ ) > sizeof( DWORD64 ) ) {
-		return ( _RET_TYPE_ )( NULL );
-	}
 
 	//
 	// rcx
@@ -816,8 +915,7 @@ X64_CALL(
 
 			add esp, 0x20
 
-			push eax
-			pop ReturnValue
+			mov ReturnValue, eax
 
 			push x64_stack_arg_count
 			pop edi
@@ -836,8 +934,30 @@ X64_CALL(
 		push edi
 		push esi
 	}
-
-	return ( _RET_TYPE_ )( ReturnValue );
 };
+
+HEAVENSGATE_NOINLINE
+NTSTATUS
+NTAPI
+X64_PROTECTVIRTUALMEMORY(
+	IN	DWORD64 BaseAddress,
+	IN	DWORD64 NumBytesToProtect,
+	IN	ULONG	ProtectionStatus,
+	OUT PULONG	OldProtectionStatus
+	)
+{
+	DWORD64 Base	 = BaseAddress;
+	DWORD64 NumBytes = NumBytesToProtect;
+
+	DWORD64 Args[ 5 ] = {
+		( DWORD64 )-1,
+		( DWORD64 )&Base,
+		( DWORD64 )&NumBytes,
+		( DWORD64 )ProtectionStatus,
+		( DWORD64 )OldProtectionStatus
+	};
+
+	return X64_SYSCALL( 0x50, Args, 5 );
+}
 #endif
 #endif
