@@ -121,20 +121,46 @@ X64_PROTECTVIRTUALMEMORY( ( DWORD64 )( _BASE_ ), ( DWORD64 )( _RANGE_ ), ( ULONG
 #define HgGetPEB( ) \
 X64_GETPEB( )
 
-//
-// For the 32-bit Instrumentation callback; the original EIP gets stored in ECX. Make sure this register is preserved in the handler
-// and jump to it at the end of the handler, preferrably with all the other registers saved as well
-//
 /**
- * @brief Sets the instrumentation callback value in Wow64InformationPointers to the specified 32-bit function
- * @param [in] FunctionPointer: The pointer to the handler function
+ * @brief Sets the instrumentation callback value in Wow64InformationPointers to the 32-bit handler
  * @return TRUE if the function succeeds
 */
+#define HgStartup32BitInstrumentation( ) \
+WOW64_STARTINSTRUMENTATIONCALLBACK( WOW64_INSTRUMENTATION_HANDLER )
+
+/**
+ * @brief Removes the instrumentation callback value from Wow64InformationPointers
+ * @return TRUE if the function succeeds
+*/
+#define HgShutdown32BitInstrumentation( ) \
+WOW64_STARTINSTRUMENTATIONCALLBACK( NULL )
+
+/**
+* @brief Populates the global exception dispatcher variable with a specified function to be handled in the WOW64_INSTRUMENTATION_HANDLER
+*/
+#define HgSet32BitExceptionDispatcher( _FUNCTION_ ) \
+HgExceptionDispatcher = ( HgUserExceptionDispatcher32_t )( _FUNCTION_ )
+
+/**
+* @brief Populates the global instrumentation callback variable with a specified function to be handled in the WOW64_INSTRUMENTATION_HANDLER
+*/
 #define HgSet32BitInstrumentationCallback( _FUNCTION_ ) \
-WOW64_SETINSTRUMENTATIONCALLBACK( ( PVOID )( _FUNCTION_ ) )
+HgInstrumentationCallback = ( HgInstrumentationCallback32_t )( _FUNCTION_ )
 
 #define GetNameFromPath( _STR_ ) \
 strrchr( _STR_, '\\' ) ? ( CONST CHAR* )( strrchr( _STR_, '\\' ) + 1 ) : ( _STR_ )
+
+typedef VOID( WINAPI* HgUserExceptionDispatcher32_t )(
+	IN LPEXCEPTION_RECORD ExceptionRecord,
+	IN LPCONTEXT ContextRecord
+	);
+
+typedef VOID( WINAPI* HgInstrumentationCallback32_t )(
+	IN DWORD ReturnAddress
+	);
+
+HgUserExceptionDispatcher32_t HgExceptionDispatcher		= NULL;
+HgInstrumentationCallback32_t HgInstrumentationCallback = NULL;
 
 typedef struct _UNICODE_STRING_64
 {
@@ -623,9 +649,78 @@ X64_SIG_SCAN_A(
 }
 
 HEAVENSGATE_NOINLINE
+__declspec( naked )
+VOID
+WOW64_INSTRUMENTATION_HANDLER( 
+	VOID 
+	)
+{
+	__asm
+	{
+		cmp HgExceptionDispatcher, 0
+		jz start_instrumentation_callback
+
+	start_exception_handler:
+		push ecx
+		push edx
+		push ebx
+		push esi
+
+		//
+		// Exception Record
+		//
+		mov ecx, dword ptr[ esp + 0x10 ] 
+
+		//
+		// Context Record
+		//
+		mov edx, dword ptr[ esp + 0x14 ]
+
+		mov ebx, ecx
+		mov esi, edx
+
+		//
+		// Check if ecx, and edx actually contain the exception pointers 
+		// which should be 0x50(sizeof( EXCEPTION_RECORD )) apart
+		//
+		sub esi, ebx 
+		cmp esi, 0x50
+		jnz end_exception_handler
+
+		push edx
+		push ecx
+		call HgExceptionDispatcher
+
+	end_exception_handler:
+		pop esi
+		pop ebx
+		pop edx
+		pop ecx
+			   
+	start_instrumentation_callback:
+
+		cmp HgInstrumentationCallback, 0
+		jz end_instrumentation_callback
+
+		pushad
+		sub esp, 0x64
+
+		push ecx
+		call HgInstrumentationCallback
+
+		add esp, 0x64
+		popad
+
+	end_instrumentation_callback:
+
+		jmp ecx
+	}
+}
+
+HEAVENSGATE_NOINLINE
 BOOLEAN
 WINAPI
-WOW64_SETINSTRUMENTATIONCALLBACK(
+WOW64_STARTINSTRUMENTATIONCALLBACK(
 	IN PVOID FunctionPointer
 )
 {
