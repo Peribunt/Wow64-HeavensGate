@@ -9,8 +9,8 @@ A header containing utilities for executing, reading and writing 64-bit data in 
 * Direct system calls
 * Direct function calls
 * Byte pattern scanning in 64-bit regions
-* Setting direct Wow64 instrumentation callback for the 32-bit process
-* Replacing ntdll32!KiUserExceptionDispatcher with your own
+* Setting direct Wow64 instrumentation callbacks for the 32-bit process
+* Hijacking ntdll32!KiUserExceptionDispatcher without touching anything in ntdll
 
 # Credits
 Partial credit goes to [Cr4sh](https://gist.github.com/Cr4sh) for providing a foundation of research
