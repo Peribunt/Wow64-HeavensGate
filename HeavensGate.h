@@ -137,9 +137,12 @@ WOW64_STARTINSTRUMENTATIONCALLBACK( NULL )
 
 /**
 * @brief Populates the global exception dispatcher variable with a specified function to be handled in the WOW64_INSTRUMENTATION_HANDLER
+* @param [in] ExceptionDispatcher: The function that'll be used as the new exception dispatcher
+* @param [out] ZwContinue: A function pointer to ZwContinue to call in the exception dispatcher
+* @return The original KiUserExceptionDispatcher if the function succeeds
 */
-#define HgSet32BitExceptionDispatcher( _FUNCTION_ ) \
-HgExceptionDispatcher = ( HgUserExceptionDispatcher32_t )( _FUNCTION_ )
+#define HgSet32BitExceptionDispatcher( _FUNCTION_, _ZWCONTINUE_ ) \
+(KiUserExceptionDispatcher_t)WOW64_SETEXCEPTIONDISPATCHER( ( HgUserExceptionDispatcher32_t )( _FUNCTION_ ), ( ZwContinue_t* )( _ZWCONTINUE_ ) )
 
 /**
 * @brief Populates the global instrumentation callback variable with a specified function to be handled in the WOW64_INSTRUMENTATION_HANDLER
@@ -150,10 +153,16 @@ HgInstrumentationCallback = ( HgInstrumentationCallback32_t )( _FUNCTION_ )
 #define GetNameFromPath( _STR_ ) \
 strrchr( _STR_, '\\' ) ? ( CONST CHAR* )( strrchr( _STR_, '\\' ) + 1 ) : ( _STR_ )
 
+typedef NTSTATUS( NTAPI* ZwContinue_t )( 
+	IN LPCONTEXT Context, 
+	IN BOOLEAN	 RaiseAlert 
+	);
+
 typedef VOID( WINAPI* HgUserExceptionDispatcher32_t )(
 	IN LPEXCEPTION_RECORD ExceptionRecord,
 	IN LPCONTEXT ContextRecord
 	);
+typedef HgUserExceptionDispatcher32_t KiUserExceptionDispatcher_t;
 
 typedef VOID( WINAPI* HgInstrumentationCallback32_t )(
 	IN DWORD ReturnAddress
@@ -649,6 +658,33 @@ X64_SIG_SCAN_A(
 }
 
 HEAVENSGATE_NOINLINE
+LPVOID
+WINAPI
+WOW64_SETEXCEPTIONDISPATCHER( 
+	IN	HgUserExceptionDispatcher32_t ExceptionDispatcher,
+	OUT ZwContinue_t*				  ZwContinue 
+	)
+{  
+	HMODULE NtDll32Base = GetModuleHandleA( "NTDLL.DLL" );
+
+	if ( NtDll32Base == NULL )
+		return NULL;
+
+	if ( ZwContinue == NULL )
+		return NULL;
+
+	*ZwContinue = ( ZwContinue_t )( GetProcAddress(
+		NtDll32Base, "ZwContinue" ) );
+
+	if ( *ZwContinue == NULL )
+		return NULL;
+
+	HgExceptionDispatcher = ExceptionDispatcher;
+
+	return GetProcAddress( NtDll32Base, "KiUserExceptionDispatcher" );
+}
+
+HEAVENSGATE_NOINLINE
 __declspec( naked )
 VOID
 WOW64_INSTRUMENTATION_HANDLER( 
@@ -696,20 +732,15 @@ WOW64_INSTRUMENTATION_HANDLER(
 		pop ebx
 		pop edx
 		pop ecx
+
+		jmp ecx
 			   
 	start_instrumentation_callback:
 
 		cmp HgInstrumentationCallback, 0
 		jz end_instrumentation_callback
 
-		pushad
-		sub esp, 0x64
-
-		push ecx
-		call HgInstrumentationCallback
-
-		add esp, 0x64
-		popad
+		jmp HgInstrumentationCallback
 
 	end_instrumentation_callback:
 
@@ -752,284 +783,216 @@ WOW64_STARTINSTRUMENTATIONCALLBACK(
 /**
  * @brief Perform a direct 64-bit system call
  * @param [in] SyscallIndex: The sytem call ID
- * @param [in] Args: The arguments for the system call
+ * @param [in, variadic] Args: The arguments for the system call
  * @param [in] NumArgs: The number of arguments for the system call
  * @return The NTSTAUS of the system call
 */
+template< typename... _VA_ARGS_ >
 HEAVENSGATE_NOINLINE
 NTSTATUS
 NTAPI
 X64_SYSCALL( 
-	IN DWORD	SyscallIndex, 
-	IN PDWORD64 Args, 
-	IN SIZE_T	NumArgs 
+	IN		DWORD		 SystemCallNumber, 
+	IN OUT  _VA_ARGS_... Args 
 	)
-{ 
-	NTSTATUS	RetValue	= NULL;
-	SIZE_T		ArgCounter	= NULL;
+{
+	NTSTATUS Result = NULL;
 
-	//
-	// rcx
-	//
-	DWORD64 x64_a1 = X64_CALL_GET_ARG( 
-		Args, NumArgs, ArgCounter );
+	CONST SIZE_T	NumArgs = sizeof...( Args ) < 4 ? ( 4 ) : sizeof...( Args );
+	CONST DWORD64	ArgsArray[ NumArgs ]{ ( DWORD64 )Args... };
 
-	//
-	// rdx
-	//
-	DWORD64 x64_a2 = X64_CALL_GET_ARG(
-		Args, NumArgs, ArgCounter );
+	DWORD64 _rcx = ArgsArray[ 00 ];
+	DWORD64 _rdx = ArgsArray[ 01 ];
+	DWORD64 _r8	 = ArgsArray[ 02 ];
+	DWORD64 _r9  = ArgsArray[ 03 ];
 
-	//
-	// r8
-	//
-	DWORD64 x64_a3 = X64_CALL_GET_ARG(
-		Args, NumArgs, ArgCounter );
-
-	//
-	// r9
-	//
-	DWORD64 x64_a4 = X64_CALL_GET_ARG(
-		Args, NumArgs, ArgCounter );
-
-	DWORD64	x64_stack_args		 = NULL;
-	DWORD64	x64_stack_args_count = NULL;
-
-	if ( NumArgs > 4 )
-	{
-		x64_stack_args_count = ( NumArgs - 4 );
-		x64_stack_args		 = ( DWORD64 )( &Args[ 3 ] );
-	}
-
-	DWORD OldStack = NULL;
+	DWORD64 StackArgCount = ( NumArgs > 4 ) ? ( NumArgs - 4 ) : ( NULL );
+	DWORD64 StackArgs	  = ( DWORD64 )( &ArgsArray[ 3 ] );
 
 	__asm
 	{
 		//
-		// Save all non-volatile GPRs
+		// Store all non-volatile registers
 		//
-		push esi
-		push edi
 		push ebx
+		push edi
+		push esi
+		//
 
-		//
-		// Align the stack to better suit 64-bit values
-		//
-		mov OldStack, esp
-		and esp, 0xFFFFFFF0
-
-		//
-		// 64-bit (Long mode)
-		//
 		ENTER_X64_MODE( );
 		{
 			//
-			// Set up the args for the x64 __fastcall calling convention
+			// Prepare arguments for x64 calling convention
 			//
-			push x64_a1
+			push _rcx
 			pop ecx
-
-			push x64_a2
+			
+			push _rdx
 			pop edx
 
-			push x64_a3
-			db( 41 ) db( 58 ) //pop r8
+			push _r8
+			db( 41 ) db( 58 )
 
-			push x64_a4
-			db( 41 ) db( 59 ) //pop r9
-			
+			push _r9
+			db( 41 ) db( 59 )
 			//
-			// Set up the loop for stack argument pushing
-			//
-			push x64_stack_args_count
-			pop edi
 
-			push x64_stack_args
+			push StackArgCount
 			pop esi
 
-			test edi, edi
-			jz system_call
+			push StackArgs
+			pop edi
 
-		push_args:
-			push [ esi + 8 * edi ]
-			sub edi, 1
-			jnz push_args
+			test esi, esi
+			jz SYSTEM_CALL
 
-		system_call:
+		STACK_ARG_PUSH:
+			push [ edi + esi * 8 ]
+			sub esi, 1
+			jnz STACK_ARG_PUSH
+
+		SYSTEM_CALL:
+
+			//
+			// Perform a system call
+			//
 			sub esp, 0x28
-			
-			//
-			// Start the syscall
-			//
 
-			mov eax, SyscallIndex	
+			mov eax, SystemCallNumber	
 			db( 49 ) db( 89 ) db( CA ) //mov r10, rcx
 			db( 0F ) db( 05 )		   //syscall
 
-			//
-			// Save the return value
-			//
-			mov RetValue, eax
+			mov Result, eax
 
 			add esp, 0x28
+			//
 
-			push x64_stack_args_count
-			pop edi
-			imul edi, 8
-
-			add esp, edi
+			push StackArgCount
+			pop esi
+			imul esi, 8
+			add esp, esi
 		}
 		EXIT_X64_MODE( );
 
-		mov esp, OldStack
-
 		//
-		// Reset saved GPRs
+		// Reset all non-volatile registers
 		//
-		pop ebx
-		pop edi
 		pop esi
+		pop edi
+		pop ebx
+		//
 	}
 
-	return RetValue;
+	return Result;
 }
 
 /**
  * @brief Perform a direct 64-bit function call
  * @param [in] FunctionAddress: The address to the function you want to call 
- * @param [in] Args: The array containing the arguments for the function call
+ * @param [in, variadic] Args: The arguments for the function call
  * @param [in] NumArgs: The amount of arguments in the array
  * @return The return value of the function called
 */
+template< typename... _VA_ARGS_ >
 HEAVENSGATE_NOINLINE
-DWORD
+DWORD64
 WINAPI
-X64_CALL( 
-	IN DWORD64	FunctionAddress, 
-	IN PDWORD64 Args, 
-	IN SIZE_T	NumArgs 
-	)
+X64_FUNCTION_CALL(
+	IN	   DWORD64		FunctionAddress,
+	IN OUT _VA_ARGS_... Args )
 {
-	DWORD		ReturnValue = NULL;
-	SIZE_T		ArgCounter	= NULL;
+	DWORD64 Result	= NULL;
+	DWORD64 pResult = ( DWORD64 )&Result;
 
-	//
-	// rcx
-	//
-	DWORD64 x64_a1 = X64_CALL_GET_ARG(
-		Args, NumArgs, ArgCounter );
+	CONST SIZE_T	NumArgs = sizeof...( Args ) < 4 ? ( 4 ) : sizeof...( Args );
+	CONST DWORD64	ArgsArray[ NumArgs ]{ ( DWORD64 )Args... };
 
-	//
-	// rdx
-	//
-	DWORD64 x64_a2 = X64_CALL_GET_ARG(
-		Args, NumArgs, ArgCounter );
+	DWORD64 _rcx = ArgsArray[ 00 ];
+	DWORD64 _rdx = ArgsArray[ 01 ];
+	DWORD64 _r8	 = ArgsArray[ 02 ];
+	DWORD64 _r9  = ArgsArray[ 03 ];
 
-	//
-	// r8
-	//
-	DWORD64 x64_a3 = X64_CALL_GET_ARG(
-		Args, NumArgs, ArgCounter );
-
-	//
-	// r9
-	//
-	DWORD64 x64_a4 = X64_CALL_GET_ARG(
-		Args, NumArgs, ArgCounter );
-
-	DWORD64 x64_stack_args		= NULL;
-	DWORD64 x64_stack_arg_count = NULL;
-
-	if ( NumArgs > 4 )
-	{
-		x64_stack_arg_count = ( NumArgs - 4 );
-		x64_stack_args		= ( DWORD64 )( &Args[ 3 ] );
-	}
-
-	DWORD OldStack = NULL;
+	DWORD64 StackArgCount = ( NumArgs > 4 ) ? ( NumArgs - 4 ) : ( NULL );
+	DWORD64 StackArgs	  = ( DWORD64 )( &ArgsArray[ 3 ] );
 
 	__asm
 	{
 		//
-		// Save non-volatile GPRs
+		// Store all non-volatile registers
 		//
-		push esi
-		push edi
 		push ebx
-
+		push edi
+		push esi
 		//
-		// Align the stack to better suit 64-bit values
-		//
-		mov OldStack, esp
-		and esp, 0xFFFFFFF0
 
 		ENTER_X64_MODE( );
 		{
 			//
-			// Set up the __fastcall arguments
+			// Prepare arguments for x64 calling convention
 			//
-			push x64_a1
+			push _rcx
 			pop ecx
-
-			push x64_a2
+			
+			push _rdx
 			pop edx
 
-			push x64_a3
+			push _r8
 			db( 41 ) db( 58 )
 
-			push x64_a4
+			push _r9
 			db( 41 ) db( 59 )
-
 			//
-			// Set up the loop for pushing the remaining arguments
-			//
-			push x64_stack_arg_count
-			pop edi
 
-			push x64_stack_args
+			push StackArgCount
 			pop esi
 
-			test edi, edi
-			jz function_call
+			push StackArgs
+			pop edi
 
-		push_args:
-			push [ esi + 8 * edi ]
-			sub edi, 1
-			jnz push_args
+			test esi, esi
+			jz FUNCTION_CALL
 
-		function_call:
+		STACK_ARG_PUSH:
+			push [ edi + esi * 8 ]
+			sub esi, 1
+			jnz STACK_ARG_PUSH
+
+		FUNCTION_CALL:
 			push FunctionAddress
 			pop eax
 
 			//
-			// Reserve shadow space on the stack for rcx, rdx, r8 and r9 to spill
+			// Perform the function call
 			//
 			sub esp, 0x20
 
 			call eax
 
 			add esp, 0x20
+			//
 
-			mov ReturnValue, eax
+			push pResult
+			pop esi
+			db( 48 ) db( 89 ) db( 06 )
 
-			push x64_stack_arg_count
-			pop edi
-			imul edi, 8
-			
-			add esp, edi
+			push StackArgCount
+			pop esi
+			imul esi, 8
+			add esp, esi
 		}
 		EXIT_X64_MODE( );
 
-		mov esp, OldStack
-
 		//
-		// Reset saved GPRs
+		// Reset all non-volatile registers
 		//
-		push ebx
-		push edi
-		push esi
+		pop esi
+		pop edi
+		pop ebx
+		//
 	}
-};
+
+	return Result;
+}
 
 HEAVENSGATE_NOINLINE
 NTSTATUS
@@ -1044,15 +1007,7 @@ X64_PROTECTVIRTUALMEMORY(
 	DWORD64 Base	 = BaseAddress;
 	DWORD64 NumBytes = NumBytesToProtect;
 
-	DWORD64 Args[ 5 ] = {
-		( DWORD64 )-1,
-		( DWORD64 )&Base,
-		( DWORD64 )&NumBytes,
-		( DWORD64 )ProtectionStatus,
-		( DWORD64 )OldProtectionStatus
-	};
-
-	return X64_SYSCALL( 0x50, Args, 5 );
+	return X64_SYSCALL( 0x50, -1, &Base, &NumBytes, ProtectionStatus, OldProtectionStatus );
 }
 #endif
 #endif
