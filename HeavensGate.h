@@ -23,7 +23,7 @@ db( 83 ) db( 04 ) db( 24 ) db( 05 )					\
 db( CB )											
 
 //
-// Switch the CPU to x86-32 mode
+// Switch the CPU to x86-32 long mode
 //
 #define EXIT_X64_MODE( )												\
 db( E8 ) db( 00 ) db( 00 ) db( 00 ) db( 00 )							\
