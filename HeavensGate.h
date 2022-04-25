@@ -64,7 +64,7 @@ X64_GETPROCADDRESS( ( DWORD64 )( _MODULE_BASE_ ), _NAME_ )
 X64_GETMODULEHANDLE( _NAME_ )
 
 /**
- * @brief Get the imafe size of a 64-bit loaded module
+ * @brief Get the image size of a 64-bit loaded module
  * @param [in] ModuleHandle: The base address of the loaded module
  * @return
 */
