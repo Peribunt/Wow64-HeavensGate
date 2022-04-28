@@ -12,5 +12,30 @@ A header containing utilities for executing, reading and writing 64-bit data in 
 * Setting direct Wow64 instrumentation callbacks for the 32-bit process
 * Hijacking ntdll32!KiUserExceptionDispatcher without touching anything in ntdll
 
+# Examples
+### Hijacking the 32-bit exception dispatcher
+```cpp
+ZwContinue_t ZwContinue = NULL;
+
+LONG
+WINAPI
+ExceptionHandler(
+    IN LPEXCEPTION_RECORD ExceptionRecord,
+    IN LPCONTEXT          ContextRecord
+    )
+{
+    //VEH code here...
+}
+
+LONG
+main(
+    VOID
+    )
+{
+    if ( HgStartup32BitInstrumentation( ) == TRUE )
+        HgSet32BitExceptionDispatcher( ExceptionHandler, &ZwContinue );
+}
+```
+
 # Credits
 Partial credit goes to [Cr4sh](https://gist.github.com/Cr4sh) for providing a foundation of research
