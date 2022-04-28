@@ -31,9 +31,6 @@ db( C7 ) db( 44 ) db( 24 ) db( 04 ) db( 23 ) db( 00 ) db( 00 ) db( 00 ) \
 db( 83 ) db( 04 ) db( 24 ) db( 0D )										\
 db( CB )
 
-#define X64_CALL_GET_ARG( _ARGS_, _NUMARGS_, _COUNTER_ ) \
-( _COUNTER_ > _NUMARGS_ || _ARGS_ == NULL ) ? ( NULL ) : ( _ARGS_[ _COUNTER_++ ] )
-
 /**
  * @brief Copy data from a 64-bit address to another region
  * @param [in] Destination: The destination to copy the data to
