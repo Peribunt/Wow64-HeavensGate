@@ -24,7 +24,9 @@ ExceptionHandler(
     IN LPCONTEXT          ContextRecord
     )
 {
-    //VEH code here...
+    //
+    // VEH code here...
+    //
 }
 
 LONG
@@ -32,7 +34,14 @@ main(
     VOID
     )
 {
+    //
+    // Activates the Wow64 instrumentation callback
+    //
     if ( HgStartup32BitInstrumentation( ) == TRUE )
+        //
+        // Populates a ZwContinue to be used in the hijacked handler,
+        // and redirects the exception instrumentation callback
+        //
         HgSet32BitExceptionDispatcher( ExceptionHandler, &ZwContinue );
 }
 ```
