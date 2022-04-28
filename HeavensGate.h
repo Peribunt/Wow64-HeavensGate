@@ -517,7 +517,7 @@ X64_GETPROCADDRESS(
 		}
 	}
 
-	return 0;
+	return NULL;
 }
 
 HEAVENSGATE_NOINLINE
