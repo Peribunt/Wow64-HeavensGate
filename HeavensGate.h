@@ -16,19 +16,19 @@
 //
 // Switch the CPU to x64 mode
 //
-#define ENTER_X64_MODE( )							\
-db( 6A ) db( 33 )									\
-db( E8 ) db( 00 ) db( 00 ) db( 00 ) db( 00 )		\
-db( 83 ) db( 04 ) db( 24 ) db( 05 )					\
+#define ENTER_X64_MODE( )                    \
+db( 6A ) db( 33 )			     \
+db( E8 ) db( 00 ) db( 00 ) db( 00 ) db( 00 ) \
+db( 83 ) db( 04 ) db( 24 ) db( 05 )	     \
 db( CB )											
 
 //
 // Switch the CPU to x86-32 mode
 //
-#define EXIT_X64_MODE( )												\
-db( E8 ) db( 00 ) db( 00 ) db( 00 ) db( 00 )							\
+#define EXIT_X64_MODE( )                                                \
+db( E8 ) db( 00 ) db( 00 ) db( 00 ) db( 00 )                            \
 db( C7 ) db( 44 ) db( 24 ) db( 04 ) db( 23 ) db( 00 ) db( 00 ) db( 00 ) \
-db( 83 ) db( 04 ) db( 24 ) db( 0D )										\
+db( 83 ) db( 04 ) db( 24 ) db( 0D )                                     \
 db( CB )
 
 /**
